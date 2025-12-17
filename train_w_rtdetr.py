@@ -1,47 +1,82 @@
 import sys
 import os
+import argparse
 
-# 假设你的核心训练代码在 src 或 similar 目录下，确保能引用到
-# sys.path.append(...)
+# ----------------------------------------------------
+# 1. 环境与路径设置
+# ----------------------------------------------------
+# 获取当前脚本所在目录（根目录）
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
-from ultralytics import RTDETR  # 或者你所使用的具体库/类的导入方式
+# ----------------------------------------------------
+# 2. 核心模块导入
+# ----------------------------------------------------
+# ⚠️ 关键点：必须导入 models，否则相关类（如 WRTDETR, Backbone 等）不会注册到注册表中，
+# 会导致配置文件读取时报错 "KeyError" 或 "Class not found"。
+import models
+
+# 导入项目内部的核心配置和分布式工具
+import src.misc.dist as dist
+from src.core import YAMLConfig
+from src.solver import TASKS
 
 
-def main():
-    # 1. 指定配置文件路径 (保持当前路径，不新建文件夹)
-    # 假设配置文件就在当前目录下，名为 'rtdetr_w_rtdetr_config.yaml' (请根据实际文件名修改)
-    config_path = 'rtdetr_w_rtdetr_config.yaml'
+def main(args):
+    # 初始化分布式环境（即使是单卡训练也建议保留此初始化）
+    dist.init_distributed()
 
-    # 确保配置文件存在
-    if not os.path.exists(config_path):
-        print(f"Error: 配置文件 {config_path} 未找到，请检查路径。")
-        return
+    # 设置随机种子
+    if args.seed is not None:
+        dist.set_seed(args.seed)
 
-    # 2. 加载模型
-    # 这里根据你的具体项目结构，可能是加载预训练权重，也可能是从配置加载
-    # 如果是 ultralytics 的用法：
-    model = RTDETR('rtdetr-l.pt')  # 或者你的 .yaml 结构文件
+    # 检查参数冲突
+    assert not all([args.tuning, args.resume]), \
+        'Only support from_scratch or resume or tuning at one time'
 
-    # 3. 开始训练
-    # 对应命令行参数: model.train(data=..., epochs=..., ...)
-    # 这里我们将配置文件的内容传进去，或者如果你的脚本已经内部读取该 yaml，直接运行即可
-
-    print(f"开始使用配置文件: {config_path} 进行训练...")
-
-    results = model.train(
-        data=config_path,  # 这里直接传入配置文件路径作为 data 参数
-        epochs=100,  # 训练轮数
-        imgsz=640,  # 输入图片大小
-        device='0',  # 显卡设备
-        project='runs/train',  # 结果保存路径
-        name='exp',  # 实验名称
-        exist_ok=True,  # 如果存在则覆盖/追加，不报错
-        # batch=16,         # 根据显存调整
-        # workers=4         # 根据CPU核心数调整
+    # ----------------------------------------------------
+    # 3. 加载配置
+    # ----------------------------------------------------
+    # 使用项目自带的 YAMLConfig 解析器，它会处理 __include__ 依赖和参数合并
+    cfg = YAMLConfig(
+        args.config,
+        resume=args.resume,
+        use_amp=args.amp,
+        tuning=args.tuning
     )
 
-    print("训练完成！")
+    # ----------------------------------------------------
+    # 4. 实例化 Solver 并开始训练
+    # ----------------------------------------------------
+    # 根据配置中的 task（如 'detection'）从 TASKS 注册表中获取对应的 Solver 类
+    solver = TASKS[cfg.yaml_cfg['task']](cfg)
+
+    if args.test_only:
+        solver.val()
+    else:
+        solver.fit()
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description="RT-DETR Training Script")
+
+    # 默认指向你最新的配置文件 configs/w_rtdetr_visdrone.yml
+    parser.add_argument('--config', '-c', type=str, default='configs/w_rtdetr_visdrone.yml',
+                        help='path to configuration file')
+
+    parser.add_argument('--resume', '-r', type=str, default=None,
+                        help='path to resume checkpoint')
+    parser.add_argument('--tuning', '-t', type=str, default=None,
+                        help='path to tuning checkpoint')
+    parser.add_argument('--test-only', action='store_true', default=False,
+                        help='only run validation')
+    parser.add_argument('--amp', action='store_true', default=False,
+                        help='enable Automatic Mixed Precision (AMP)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='random seed')
+
+    args = parser.parse_args()
+
+    print(f"Using configuration: {args.config}")
+    main(args)
