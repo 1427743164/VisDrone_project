@@ -5,10 +5,8 @@
 # 3. Loss：启用 NWD Loss
 
 __include__: [
-  '../dataset/visdrone_detection.yml',
-  '../runtime.yml',
-  './include/dataloader.yml',
-  './include/optimizer.yml',
+  'dataset/visdrone_detection.yml',
+  'runtime.yml',
 ]
 
 output_dir: ./output/w_rtdetr_visdrone_final

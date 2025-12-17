@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.core import register
 
 # 引入我们上一阶段写好的完全体小波模块
 from models.layers.wavelet import HaarWaveletDownsampling
@@ -76,7 +77,7 @@ class Bottleneck(nn.Module):
 
         return out
 
-
+@register
 class WaveletPResNet(nn.Module):
     """
     [完全体] Wavelet-Integrated PResNet Backbone

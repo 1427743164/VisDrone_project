@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from src.core import register
 
 
 class SpectralGatedMambaBlock(nn.Module):
@@ -71,7 +72,7 @@ class SpectralGatedMambaBlock(nn.Module):
         out = self.out_proj(out)
         return out
 
-
+@register
 class SpectralMambaEncoder(nn.Module):
     """
     [完全体] VisDrone 专用：谱状态空间编码器

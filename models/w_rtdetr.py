@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from src.core import register
 # --- 引入之前的魔改模块 ---
 from models.backbones.presnet_wavelet import WaveletPResNet
 from models.necks.spectral_mamba_encoder import SpectralMambaEncoder
@@ -20,6 +20,8 @@ except ImportError:
     print("Warning: Standard RT-DETR modules not found. Ensure you are in the project root.")
 
 
+
+@register
 class WRTDETR(nn.Module):
     """
     [终极完全体 v2.0] W-RT-DETR
