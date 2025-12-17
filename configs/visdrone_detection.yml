@@ -1,21 +1,22 @@
 task: detection
 
-num_classes: 10 # VisDrone 有 10 类
-remap_mscoco_category: False # 不需要 COCO 映射
+num_classes: 10 # VisDrone 类别数
+remap_mscoco_category: False
 
 train_dataloader:
   type: DataLoader
   dataset:
     type: CocoDetection
-    # 这里的路径要对应你的 datasets 文件夹结构
+    # 指向你的训练集图片
     img_folder: ./datasets/VisDrone2019-DET-train/images
-    ann_file: ./datasets/VisDrone2019-DET-train/annotations_coco.json # ⚠️注意：你需要把 VisDrone 标注转为 COCO 格式的 JSON
+    # 指向你的 COCO 格式标注文件 (必须是 JSON)
+    ann_file: ./datasets/VisDrone2019-DET-train/train.json
     return_masks: False
     transforms:
       type: Compose
       ops: ~
   shuffle: True
-  batch_size: 4 # 根据显存调整，VisDrone图片大，建议从小开始
+  batch_size: 4 # 根据显存调整
   num_workers: 4
   drop_last: True
 
@@ -24,7 +25,7 @@ val_dataloader:
   dataset:
     type: CocoDetection
     img_folder: ./datasets/VisDrone2019-DET-val/images
-    ann_file: ./datasets/VisDrone2019-DET-val/annotations_coco.json
+    ann_file: ./datasets/VisDrone2019-DET-val/val.json
     return_masks: False
     transforms:
       type: Compose
