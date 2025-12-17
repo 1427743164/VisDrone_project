@@ -149,6 +149,20 @@ class WaveletPResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
+    def train(self, mode=True):
+        """
+        重写 train 方法，确保在训练模式下，如果 freeze_norm 为 True，
+        强制将所有 BatchNorm 层设置为 eval 模式（不更新均值方差）。
+        这对 Batch Size 小于 4 的情况至关重要。
+        """
+        super().train(mode)
+        if mode and self.freeze_norm:
+            for m in self.modules():
+                # 冻结 BN 的统计量更新
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
+                    # 可选：如果你想更彻底，可以把 weight/bias 的梯度也关掉，但通常 eval() 就够稳了
+
     def forward(self, x):
         # 1. Stem (Wavelet + MaxPool) -> H/4
         x = self.conv1(x)
