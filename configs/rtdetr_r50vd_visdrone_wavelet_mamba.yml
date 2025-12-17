@@ -1,0 +1,51 @@
+__include__: [
+  '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  './include/dataloader.yml',
+  './include/optimizer.yml',
+  './include/rtdetr_r50vd.yml',
+]
+
+output_dir: ./output/rtdetr_r50vd_visdrone_wavelet_mamba
+
+# --- 1. 魔改 Backbone ---
+WaveletPResNet:
+  depth: 50
+  variant: d
+  num_stages: 4
+  return_idx: [1, 2, 3]
+  freeze_at: 0
+  freeze_norm: True
+
+# --- 2. 魔改 Encoder ---
+SpectralMambaEncoder:
+  in_channels: [512, 1024, 2048] # 对应 ResNet50
+  hidden_dim: 256
+  encoder_idx: [1, 2] # 开启 S4 和 S5 的 Mamba
+
+# --- 3. 魔改 Matcher ---
+FrequencySinkhornMatcher:
+  cost_class: 2.0
+  cost_bbox: 5.0
+  cost_nwd: 5.0 # 替代 GIoU
+  alpha: 0.25
+  gamma: 2.0
+
+# --- 4. 魔改 Criterion (Loss) ---
+# 注意：需要在 criterion 代码里手动把 GIoU Loss 换成 NWD Loss
+# 或者如果支持配置：
+SetCriterion:
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2} # 加上 nwd
+  losses: ['vfl', 'boxes', 'nwd'] # 注册 nwd
+  matcher:
+    type: FrequencySinkhornMatcher
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_nwd: 5.0
+
+# --- 架构组装 ---
+RTDETR:
+  backbone: WaveletPResNet
+  encoder: SpectralMambaEncoder
+  # Head 部分通常需要微调代码以插入 DensityGuidedQuerySelection
+  # 建议在 RTDETRTransformer 类中手动替换 QuerySelection 模块
