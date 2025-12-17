@@ -1,6 +1,13 @@
 """by lyuwenyu
 """
+import sys
+import os
+# 将项目根目录加入路径
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
+# ----------------------------------------------------
+# ⚠️ 必须加上这一行，触发 models/__init__.py 里的注册机制
+import models
 import os 
 import sys 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
