@@ -1,13 +1,12 @@
 """"by lyuwenyu
 """
 
-
-import torch 
-import torch.nn as nn 
+import torch
+import torch.nn as nn
 
 import torchvision
 torchvision.disable_beta_transforms_warning()
-# [修改点] datapoints 已废弃，改为 tv_tensors
+# [关键修改1] 引入新版 API tv_tensors
 from torchvision import tv_tensors
 
 import torchvision.transforms.v2 as T
@@ -27,12 +26,33 @@ RandomZoomOut = register(T.RandomZoomOut)
 # RandomIoUCrop = register(T.RandomIoUCrop)
 RandomHorizontalFlip = register(T.RandomHorizontalFlip)
 Resize = register(T.Resize)
-ToImageTensor = register(T.ToImageTensor)
-ConvertDtype = register(T.ConvertDtype)
-SanitizeBoundingBox = register(T.SanitizeBoundingBox)
+
+# [关键修改2] 注释掉所有旧版废弃的 API，改用下方手动定义
+# ToImageTensor = register(T.ToImageTensor)
+# ConvertDtype = register(T.ConvertDtype)
+# SanitizeBoundingBox = register(T.SanitizeBoundingBox)
+
 RandomCrop = register(T.RandomCrop)
 Normalize = register(T.Normalize)
 
+
+# [关键修复3] 修复 ToImageTensor -> 映射为 T.ToImage
+@register
+class ToImageTensor(T.ToImage):
+    def __init__(self):
+        super().__init__()
+
+# [关键修复4] 修复 ConvertDtype -> 映射为 T.ToDtype (必须开启 scale=True 以保持 0-1 缩放)
+@register
+class ConvertDtype(T.ToDtype):
+    def __init__(self, dtype=torch.float32, scale=True):
+        # 如果配置文件里传了 dtype，这里会被覆盖；默认 float32
+        super().__init__(dtype=dtype, scale=scale)
+
+# [关键修复5] 修复 SanitizeBoundingBox -> 映射为 T.SanitizeBoundingBoxes
+@register
+class SanitizeBoundingBox(T.SanitizeBoundingBoxes):
+    pass
 
 
 @register
@@ -69,13 +89,13 @@ class EmptyTransform(T.Transform):
 
 @register
 class PadToSize(T.Pad):
-    # [修改点] 更新类型检查列表
+    # [关键修改6] 更新类型检查列表，使用 tv_tensors 替代 datapoints
     _transformed_types = (
         Image.Image,
         tv_tensors.Image,
         tv_tensors.Video,
         tv_tensors.Mask,
-        tv_tensors.BoundingBoxes, # 注意复数
+        tv_tensors.BoundingBoxes, # 注意：新版 API 是复数
     )
     def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         sz = F.get_spatial_size(flat_inputs[0])
@@ -124,7 +144,7 @@ class RandomIoUCrop(T.RandomIoUCrop):
 @register
 class ConvertBox(T.Transform):
     _transformed_types = (
-        tv_tensors.BoundingBoxes, # [修改点] 注意复数
+        tv_tensors.BoundingBoxes, # [关键修改7] 使用 tv_tensors.BoundingBoxes
     )
     def __init__(self, out_fmt='', normalize=False) -> None:
         super().__init__()
@@ -138,15 +158,15 @@ class ConvertBox(T.Transform):
 
     def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         if self.out_fmt:
-            canvas_size = inpt.canvas_size # [修改点] spatial_size 变更为 canvas_size
+            # [关键修改8] spatial_size 变更为 canvas_size
+            canvas_size = inpt.canvas_size
             in_fmt = inpt.format.value.lower()
             inpt = torchvision.ops.box_convert(inpt, in_fmt=in_fmt, out_fmt=self.out_fmt)
-            # [修改点] BoundingBoxes + canvas_size
+            # 使用 canvas_size 重新封装
             inpt = tv_tensors.BoundingBoxes(inpt, format=self.data_fmt[self.out_fmt], canvas_size=canvas_size)
 
         if self.normalize:
-            # [修改点] spatial_size 可能需要兼容检查，新版通常用 canvas_size
-            # 如果 inpt.canvas_size 返回的是 (h, w)，则保持逻辑不变
+            # 兼容性处理
             inpt = inpt / torch.tensor(inpt.canvas_size[::-1]).tile(2)[None]
 
         return inpt
