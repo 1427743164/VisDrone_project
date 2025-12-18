@@ -19,6 +19,8 @@ train_dataloader:
   batch_size: 4 # 根据显存调整
   num_workers: 4
   drop_last: True
+  # [关键修复] 必须指定 collate_fn，否则无法处理不同数量的检测框
+  collate_fn: default_collate_fn
 
 val_dataloader:
   type: DataLoader
@@ -34,3 +36,5 @@ val_dataloader:
   batch_size: 4
   num_workers: 4
   drop_last: False
+  # [关键修复] 验证集也要加
+  collate_fn: default_collate_fn
