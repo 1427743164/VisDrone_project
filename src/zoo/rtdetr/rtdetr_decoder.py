@@ -10,14 +10,15 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import torch.nn.init as init 
 
+# [修复] 找回了之前漏掉的引用，这对原始 RTDETRTransformer 至关重要
+from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-
 
 from src.core import register
 
 
-__all__ = ['RTDETRTransformer', 'RTDETRTransformerDecoder'] # [修改] 显式导出新类
+__all__ = ['RTDETRTransformer', 'RTDETRTransformerDecoder']
 
 
 class MLP(nn.Module):
@@ -276,7 +277,6 @@ class TransformerDecoder(nn.Module):
         return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
 
 
-# [注意] 这是原有的完整类，我完全保留了它，没有删减任何逻辑
 @register
 class RTDETRTransformer(nn.Module):
     __share__ = ['num_classes']
@@ -575,17 +575,17 @@ class RTDETRTransformer(nn.Module):
 
 # ====================================================================================
 # [核心新增] 专门为 WRTDETR 设计的解码器堆叠类
-# 它是一个“完全体”组件，不仅不简化逻辑，反而增强了逻辑：
-# 1. 它调用底层的 TransformerDecoderLayer，这是标准做法。
-# 2. 它返回所有层 (6层) 的特征堆叠，而不是只返回最后一层。
-# 3. 这使得 WRTDETR 可以实现 Deep Supervision (深层监督)，让每一层 Decoder 都计算 Loss。
+# 这是一个“完全体”组件，不仅不简化逻辑，反而增强了逻辑：
+# 1. 它复用底层的 TransformerDecoderLayer，逻辑与官方完全一致。
+# 2. 它返回所有层 (6层) 的特征堆叠 (Stack)，而不仅仅是最后一层。
+# 3. 这使得 WRTDETR 可以实现 Deep Supervision (深层监督)，让每一层 Decoder 都参与 Loss 计算。
 # ====================================================================================
 class RTDETRTransformerDecoder(nn.Module):
     def __init__(self, hidden_dim, num_decoder_layers, num_head=8, num_levels=3, dim_feedforward=1024, dropout=0., activation="relu", num_decoder_points=4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_decoder_layers
-        # 复用已有的 TransformerDecoderLayer，保证参数一致性
+        # 复用已有的 TransformerDecoderLayer，保证参数和逻辑的一致性
         self.layers = nn.ModuleList([
             TransformerDecoderLayer(hidden_dim, num_head, dim_feedforward, dropout, activation, num_levels, num_decoder_points)
             for _ in range(num_decoder_layers)

@@ -11,7 +11,7 @@ import torch.utils.data
 import torchvision
 torchvision.disable_beta_transforms_warning()
 
-# [修改1] 使用 tv_tensors 替代 datapoints
+# [关键升级] 引入 tv_tensors
 from torchvision import tv_tensors
 
 from pycocotools import mask as coco_mask
@@ -36,26 +36,28 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         self.remap_mscoco_category = remap_mscoco_category
 
     def __getitem__(self, idx):
+        # 1. 调用父类读取原始图片和 COCO 标注
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
+
+        # 2. 数据清洗与格式化 (多边形->Mask, 框修正)
         img, target = self.prepare(img, target)
 
-        # ['boxes', 'masks', 'labels']:
+        # 3. [关键升级] 将数据包装为 tv_tensors，让 Transforms V2 能识别它们
         if 'boxes' in target:
-            # [修改2] 使用 tv_tensors.BoundingBoxes
             target['boxes'] = tv_tensors.BoundingBoxes(
                 target['boxes'],
                 format=tv_tensors.BoundingBoxFormat.XYXY,
-                canvas_size=img.size[::-1]) # [修改3] spatial_size -> canvas_size
+                canvas_size=img.size[::-1]) # 注意: canvas_size 需要 (H, W)
 
         if 'masks' in target:
-            # [修改4] 使用 tv_tensors.Mask
             target['masks'] = tv_tensors.Mask(target['masks'])
 
+        # 4. 执行数据增强
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-            
+
         return img, target
 
     def extra_repr(self) -> str:
@@ -64,7 +66,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         if hasattr(self, '_transforms') and self._transforms is not None:
             s += f' transforms:\n   {repr(self._transforms)}'
 
-        return s 
+        return s
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):

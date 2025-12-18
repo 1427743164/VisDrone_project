@@ -1,7 +1,7 @@
 # W-RT-DETR VisDrone Configuration
 # 核心策略：
 # 1. 优化器：AdamW + Cosine Annealing
-# 2. 数据增强：VisDrone 目标太密，关闭 Mosaic 这种强烈的拼图增强，防止小目标被截断
+# 2. 数据增强：VisDrone 目标太密，关闭 Mosaic，防止小目标被截断
 # 3. Loss：启用 NWD Loss
 
 __include__: [
@@ -17,7 +17,7 @@ model:
   backbone_depth: 50
   num_classes: 10 # VisDrone 有 10 类
   hidden_dim: 256
-  num_queries: 300 # 可以尝试增加到 500 如果显存允许
+  num_queries: 300
 
 # --- 损失函数 & 匹配器 ---
 criterion:
@@ -25,7 +25,7 @@ criterion:
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2} # 启用 loss_nwd
   losses: ['vfl', 'boxes', 'nwd'] # 注册 nwd
   matcher:
-    type: FrequencySinkhornMatcher # 对应 models/matchers/freq_sinkhorn_matcher.py
+    type: FrequencySinkhornMatcher
     cost_class: 2.0
     cost_bbox: 5.0
     cost_nwd: 5.0
@@ -49,7 +49,6 @@ lr_scheduler:
   eta_min: 0.0
 
 # --- 数据加载 ---
-# 关键修改：VisDrone 不要用 Mosaic，改用简单的 RandomResize
 train_dataloader:
   dataset:
     transforms:
@@ -60,6 +59,8 @@ train_dataloader:
         - {type: SanitizeBoundingBox, min_size: 1}
         - {type: RandomHorizontalFlip}
         - {type: Resize, size: [640, 640]}
-        # 移除了 Mosaic 和 Mixup，这对 VisDrone 这种密集数据集通常有负面效果
+        # [关键修复] 必须加上这两步，把图片转为 Tensor 并归一化，否则 DataLoader 会崩
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
 
-epoches: 72 # VisDrone 72 epoch 足够收敛
+epoches: 72
