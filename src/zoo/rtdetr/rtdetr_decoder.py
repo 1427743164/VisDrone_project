@@ -10,16 +10,13 @@ import torch.nn as nn
 import torch.nn.functional as F 
 import torch.nn.init as init 
 
-from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-
 
 from src.core import register
 
 
-__all__ = ['RTDETRTransformer']
-
+__all__ = ['RTDETRTransformer', 'RTDETRTransformerDecoder'] # 导出两个类
 
 
 class MLP(nn.Module):
@@ -209,10 +206,10 @@ class TransformerDecoderLayer(nn.Module):
 
         # cross attention
         tgt2 = self.cross_attn(\
-            self.with_pos_embed(tgt, query_pos_embed), 
-            reference_points, 
-            memory, 
-            memory_spatial_shapes, 
+            self.with_pos_embed(tgt, query_pos_embed),
+            reference_points,
+            memory,
+            memory_spatial_shapes,
             memory_mask)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
@@ -301,7 +298,7 @@ class RTDETRTransformer(nn.Module):
                  learnt_init_query=False,
                  eval_spatial_size=None,
                  eval_idx=-1,
-                 eps=1e-2, 
+                 eps=1e-2,
                  aux_loss=True):
 
         super(RTDETRTransformer, self).__init__()
@@ -334,7 +331,7 @@ class RTDETRTransformer(nn.Module):
         self.label_noise_ratio = label_noise_ratio
         self.box_noise_scale = box_noise_scale
         # denoising part
-        if num_denoising > 0: 
+        if num_denoising > 0:
             # self.denoising_class_embed = nn.Embedding(num_classes, hidden_dim, padding_idx=num_classes-1) # TODO for load paddle weights
             self.denoising_class_embed = nn.Embedding(num_classes+1, hidden_dim, padding_idx=num_classes)
 
@@ -379,7 +376,7 @@ class RTDETRTransformer(nn.Module):
             init.constant_(cls_.bias, bias)
             init.constant_(reg_.layers[-1].weight, 0)
             init.constant_(reg_.layers[-1].bias, 0)
-        
+
         # linear_init_(self.enc_output[0])
         init.xavier_uniform_(self.enc_output[0].weight)
         if self.learnt_init_query:
@@ -393,7 +390,7 @@ class RTDETRTransformer(nn.Module):
         for in_channels in feat_channels:
             self.input_proj.append(
                 nn.Sequential(OrderedDict([
-                    ('conv', nn.Conv2d(in_channels, self.hidden_dim, 1, bias=False)), 
+                    ('conv', nn.Conv2d(in_channels, self.hidden_dim, 1, bias=False)),
                     ('norm', nn.BatchNorm2d(self.hidden_dim,))])
                 )
             )
@@ -481,7 +478,7 @@ class RTDETRTransformer(nn.Module):
             anchors, valid_mask = self.anchors.to(memory.device), self.valid_mask.to(memory.device)
 
         # memory = torch.where(valid_mask, memory, 0)
-        memory = valid_mask.to(memory.dtype) * memory  # TODO fix type error for onnx export 
+        memory = valid_mask.to(memory.dtype) * memory  # TODO fix type error for onnx export
 
         output_memory = self.enc_output(memory)
 
@@ -489,7 +486,7 @@ class RTDETRTransformer(nn.Module):
         enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
 
         _, topk_ind = torch.topk(enc_outputs_class.max(-1).values, self.num_queries, dim=1)
-        
+
         reference_points_unact = enc_outputs_coord_unact.gather(dim=1, \
             index=topk_ind.unsqueeze(-1).repeat(1, 1, enc_outputs_coord_unact.shape[-1]))
 
@@ -497,7 +494,7 @@ class RTDETRTransformer(nn.Module):
         if denoising_bbox_unact is not None:
             reference_points_unact = torch.concat(
                 [denoising_bbox_unact, reference_points_unact], 1)
-        
+
         enc_topk_logits = enc_outputs_class.gather(dim=1, \
             index=topk_ind.unsqueeze(-1).repeat(1, 1, enc_outputs_class.shape[-1]))
 
@@ -519,16 +516,16 @@ class RTDETRTransformer(nn.Module):
 
         # input projection and embedding
         (memory, spatial_shapes, level_start_index) = self._get_encoder_input(feats)
-        
+
         # prepare denoising training
         if self.training and self.num_denoising > 0:
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = \
                 get_contrastive_denoising_training_group(targets, \
-                    self.num_classes, 
-                    self.num_queries, 
-                    self.denoising_class_embed, 
-                    num_denoising=self.num_denoising, 
-                    label_noise_ratio=self.label_noise_ratio, 
+                    self.num_classes,
+                    self.num_queries,
+                    self.denoising_class_embed,
+                    num_denoising=self.num_denoising,
+                    label_noise_ratio=self.label_noise_ratio,
                     box_noise_scale=self.box_noise_scale, )
         else:
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
@@ -557,7 +554,7 @@ class RTDETRTransformer(nn.Module):
         if self.training and self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(out_logits[:-1], out_bboxes[:-1])
             out['aux_outputs'].extend(self._set_aux_loss([enc_topk_logits], [enc_topk_bboxes]))
-            
+
             if self.training and dn_meta is not None:
                 out['dn_aux_outputs'] = self._set_aux_loss(dn_out_logits, dn_out_bboxes)
                 out['dn_meta'] = dn_meta
@@ -572,3 +569,44 @@ class RTDETRTransformer(nn.Module):
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b}
                 for a, b in zip(outputs_class, outputs_coord)]
+
+
+# [新增] 专门为 WRTDETR 设计的解码器堆叠类 (兼容你的 models/w_rtdetr.py)
+# 它只负责跑 6 层 Transformer Layer，返回所有层的特征堆叠 (Stack)，不负责 Head 预测
+class RTDETRTransformerDecoder(nn.Module):
+    def __init__(self, hidden_dim, num_decoder_layers, num_head=8, num_levels=3, dim_feedforward=1024, dropout=0., activation="relu", num_decoder_points=4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_decoder_layers
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(hidden_dim, num_head, dim_feedforward, dropout, activation, num_levels, num_decoder_points)
+            for _ in range(num_decoder_layers)
+        ])
+
+    def forward(self, tgt, ref_points, memory, spatial_shapes, tgt_mask=None):
+        level_start_index = [0]
+        for (h, w) in spatial_shapes:
+            level_start_index.append(h * w + level_start_index[-1])
+        level_start_index.pop()
+        level_start_index = torch.tensor(level_start_index, device=memory.device)
+
+        output = tgt
+
+        # [关键] 记录每一层的输出，用于 Deep Supervision
+        intermediate = []
+
+        for layer in self.layers:
+            ref_points_input = ref_points.unsqueeze(2)
+            output = layer(
+                tgt=output,
+                reference_points=ref_points_input,
+                memory=memory,
+                memory_spatial_shapes=spatial_shapes,
+                memory_level_start_index=level_start_index,
+                attn_mask=tgt_mask,
+                query_pos_embed=None
+            )
+            intermediate.append(output)
+
+        # [关键] 返回 Stack 后的结果 [Num_Layers, B, N, C]
+        return torch.stack(intermediate), ref_points
