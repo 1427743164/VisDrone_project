@@ -1,18 +1,18 @@
 """"by lyuwenyu
 """
 
-import torch
-import torch.nn as nn
+
+import torch 
+import torch.nn as nn 
 
 import torchvision
 torchvision.disable_beta_transforms_warning()
-# [关键修改1] 引入新版 API tv_tensors
-from torchvision import tv_tensors
+from torchvision import datapoints
 
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as F
 
-from PIL import Image
+from PIL import Image 
 from typing import Any, Dict, List, Optional
 
 from src.core import register, GLOBAL_CONFIG
@@ -26,33 +26,12 @@ RandomZoomOut = register(T.RandomZoomOut)
 # RandomIoUCrop = register(T.RandomIoUCrop)
 RandomHorizontalFlip = register(T.RandomHorizontalFlip)
 Resize = register(T.Resize)
-
-# [关键修改2] 注释掉所有旧版废弃的 API，改用下方手动定义
-# ToImageTensor = register(T.ToImageTensor)
-# ConvertDtype = register(T.ConvertDtype)
-# SanitizeBoundingBox = register(T.SanitizeBoundingBox)
-
+ToImageTensor = register(T.ToImageTensor)
+ConvertDtype = register(T.ConvertDtype)
+SanitizeBoundingBox = register(T.SanitizeBoundingBox)
 RandomCrop = register(T.RandomCrop)
 Normalize = register(T.Normalize)
 
-
-# [关键修复3] 修复 ToImageTensor -> 映射为 T.ToImage
-@register
-class ToImageTensor(T.ToImage):
-    def __init__(self):
-        super().__init__()
-
-# [关键修复4] 修复 ConvertDtype -> 映射为 T.ToDtype (必须开启 scale=True 以保持 0-1 缩放)
-@register
-class ConvertDtype(T.ToDtype):
-    def __init__(self, dtype=torch.float32, scale=True):
-        # 如果配置文件里传了 dtype，这里会被覆盖；默认 float32
-        super().__init__(dtype=dtype, scale=scale)
-
-# [关键修复5] 修复 SanitizeBoundingBox -> 映射为 T.SanitizeBoundingBoxes
-@register
-class SanitizeBoundingBox(T.SanitizeBoundingBoxes):
-    pass
 
 
 @register
@@ -73,7 +52,7 @@ class Compose(T.Compose):
                     raise ValueError('')
         else:
             transforms =[EmptyTransform(), ]
-
+ 
         super().__init__(transforms=transforms)
 
 
@@ -89,13 +68,12 @@ class EmptyTransform(T.Transform):
 
 @register
 class PadToSize(T.Pad):
-    # [关键修改6] 更新类型检查列表，使用 tv_tensors 替代 datapoints
     _transformed_types = (
         Image.Image,
-        tv_tensors.Image,
-        tv_tensors.Video,
-        tv_tensors.Mask,
-        tv_tensors.BoundingBoxes, # 注意：新版 API 是复数
+        datapoints.Image,
+        datapoints.Video,
+        datapoints.Mask,
+        datapoints.BoundingBox,
     )
     def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         sz = F.get_spatial_size(flat_inputs[0])
@@ -109,11 +87,11 @@ class PadToSize(T.Pad):
     def __init__(self, spatial_size, fill=0, padding_mode='constant') -> None:
         if isinstance(spatial_size, int):
             spatial_size = (spatial_size, spatial_size)
-
+        
         self.spatial_size = spatial_size
         super().__init__(0, fill, padding_mode)
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:        
         fill = self._fill[type(inpt)]
         padding = params['padding']
         return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
@@ -132,7 +110,7 @@ class PadToSize(T.Pad):
 class RandomIoUCrop(T.RandomIoUCrop):
     def __init__(self, min_scale: float = 0.3, max_scale: float = 1, min_aspect_ratio: float = 0.5, max_aspect_ratio: float = 2, sampler_options: Optional[List[float]] = None, trials: int = 40, p: float = 1.0):
         super().__init__(min_scale, max_scale, min_aspect_ratio, max_aspect_ratio, sampler_options, trials)
-        self.p = p
+        self.p = p 
 
     def __call__(self, *inputs: Any) -> Any:
         if torch.rand(1) >= self.p:
@@ -144,7 +122,7 @@ class RandomIoUCrop(T.RandomIoUCrop):
 @register
 class ConvertBox(T.Transform):
     _transformed_types = (
-        tv_tensors.BoundingBoxes, # [关键修改7] 使用 tv_tensors.BoundingBoxes
+        datapoints.BoundingBox,
     )
     def __init__(self, out_fmt='', normalize=False) -> None:
         super().__init__()
@@ -152,22 +130,19 @@ class ConvertBox(T.Transform):
         self.normalize = normalize
 
         self.data_fmt = {
-            'xyxy': tv_tensors.BoundingBoxFormat.XYXY,
-            'cxcywh': tv_tensors.BoundingBoxFormat.CXCYWH
+            'xyxy': datapoints.BoundingBoxFormat.XYXY,
+            'cxcywh': datapoints.BoundingBoxFormat.CXCYWH
         }
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:  
         if self.out_fmt:
-            # [关键修改8] spatial_size 变更为 canvas_size
-            canvas_size = inpt.canvas_size
+            spatial_size = inpt.spatial_size
             in_fmt = inpt.format.value.lower()
             inpt = torchvision.ops.box_convert(inpt, in_fmt=in_fmt, out_fmt=self.out_fmt)
-            # 使用 canvas_size 重新封装
-            inpt = tv_tensors.BoundingBoxes(inpt, format=self.data_fmt[self.out_fmt], canvas_size=canvas_size)
-
+            inpt = datapoints.BoundingBox(inpt, format=self.data_fmt[self.out_fmt], spatial_size=spatial_size)
+        
         if self.normalize:
-            # 兼容性处理
-            inpt = inpt / torch.tensor(inpt.canvas_size[::-1]).tile(2)[None]
+            inpt = inpt / torch.tensor(inpt.spatial_size[::-1]).tile(2)[None]
 
         return inpt
 

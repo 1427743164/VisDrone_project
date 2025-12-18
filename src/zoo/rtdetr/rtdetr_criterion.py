@@ -17,7 +17,7 @@ from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from src.misc.dist import get_world_size, is_dist_available_and_initialized
 from src.core import register
 
-from models.losses.nwd_loss import NWDLoss
+
 
 @register
 class SetCriterion(nn.Module):
@@ -50,7 +50,6 @@ class SetCriterion(nn.Module):
 
         self.alpha = alpha
         self.gamma = gamma
-        self.nwd_loss = NWDLoss(constant=12.5, reduction='none')
 
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
@@ -150,27 +149,6 @@ class SetCriterion(nn.Module):
         losses = {'cardinality_error': card_err}
         return losses
 
-    # --- 修改/添加 loss_nwd 函数 ---
-    def loss_nwd(self, outputs, targets, indices, num_boxes, log=True):
-        assert 'pred_boxes' in outputs
-        idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-        # [完全体修正 2] 坐标尺度还原
-        # NWD 对尺度敏感。RT-DETR 输出是 [0,1]，直接算 Loss 会失效。
-        # 这里乘以 640 (常用训练尺寸) 将其映射回像素级尺度，适配 constant=12.5。
-        # 即使实际输入图不是 640，只要统一映射到一个固定的大尺度 (如 640 或 1024)，NWD 就能正常工作。
-        training_size = 640.0
-
-        loss_nwd = self.nwd_loss(src_boxes * training_size, target_boxes * training_size)
-
-        # [完全体修正 3] 遵循 DETR 标准归约方式：Sum / Num_Boxes
-        # 这样 Loss 的量级才和 loss_bbox, loss_giou 处于同一个“频道”，权重配置才有效。
-        losses = {'loss_nwd': loss_nwd.sum() / num_boxes}
-
-        return losses
-
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
@@ -243,7 +221,6 @@ class SetCriterion(nn.Module):
             'bce': self.loss_labels_bce,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
-            'nwd': self.loss_nwd,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

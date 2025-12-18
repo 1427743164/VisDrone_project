@@ -9,3 +9,4 @@ from .matchers.freq_sinkhorn_matcher import FrequencySinkhornMatcher
 # 或者你可以直接将它们加入到 registry 字典中，取决于你 clone 的代码库风格
 # 简单粗暴的方法：确保上面的 import 语句执行了，
 # 然后在 core/yaml_utils.py 里，确保它能 getattr 到这些类。
+from .losses.nwd_loss import NWDLoss
