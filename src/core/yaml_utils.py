@@ -23,14 +23,14 @@ def register(cls: type):
 
     if inspect.isfunction(cls):
         GLOBAL_CONFIG[cls.__name__] = cls
-    
+
     elif inspect.isclass(cls):
         GLOBAL_CONFIG[cls.__name__] = extract_schema(cls)
 
     else:
         raise ValueError(f'register {cls}')
 
-    return cls 
+    return cls
 
 
 def extract_schema(cls: type):
@@ -38,7 +38,7 @@ def extract_schema(cls: type):
     Args:
         cls (type),
     Return:
-        Dict, 
+        Dict,
     '''
     argspec = inspect.getfullargspec(cls.__init__)
     arg_names = [arg for arg in argspec.args if arg != 'self']
@@ -55,15 +55,15 @@ def extract_schema(cls: type):
         if name in schame['_share']:
             assert i >= num_requires, 'share config must have default value.'
             value = argspec.defaults[i - num_requires]
-        
+
         elif i >= num_requires:
             value = argspec.defaults[i - num_requires]
 
         else:
-            value = None 
+            value = None
 
         schame[name] = value
-        
+
     return schame
 
 
@@ -71,6 +71,14 @@ def extract_schema(cls: type):
 def create(type_or_name, **kwargs):
     '''
     '''
+    # [新增] 增强鲁棒性：支持字典类型的输入，防止 yaml 解析出的 dict 导致报错
+    if isinstance(type_or_name, dict):
+        config = type_or_name.copy()
+        if 'type' not in config:
+            raise ValueError("Dictionary input to create() must have a 'type' key.")
+        type_or_name = config.pop('type')
+        kwargs.update(config)
+
     assert type(type_or_name) in (type, str), 'create should be class or name.'
 
     name = type_or_name if isinstance(type_or_name, str) else type_or_name.__name__
@@ -85,20 +93,23 @@ def create(type_or_name, **kwargs):
 
     if isinstance(cfg, dict) and 'type' in cfg:
         _cfg: dict = GLOBAL_CONFIG[cfg['type']]
-        _cfg.update(cfg) # update global cls default args 
+        _cfg.update(cfg) # update global cls default args
         _cfg.update(kwargs) # TODO
         name = _cfg.pop('type')
-        
+
         return create(name)
 
 
     cls = getattr(cfg['_pymodule'], name)
     argspec = inspect.getfullargspec(cls.__init__)
     arg_names = [arg for arg in argspec.args if arg != 'self']
-    
+
     cls_kwargs = {}
     cls_kwargs.update(cfg)
-    
+
+    # [关键] 确保用户传入的 kwargs 优先级高于配置文件
+    cls_kwargs.update(kwargs)
+
     # shared var
     for k in cfg['_share']:
         if k in GLOBAL_CONFIG:
@@ -113,16 +124,16 @@ def create(type_or_name, **kwargs):
         if _k is None:
             continue
 
-        if isinstance(_k, str):            
+        if isinstance(_k, str):
             if _k not in GLOBAL_CONFIG:
                 raise ValueError(f'Missing inject config of {_k}.')
 
             _cfg = GLOBAL_CONFIG[_k]
-            
+
             if isinstance(_cfg, dict):
                 cls_kwargs[k] = create(_cfg['_name'])
             else:
-                cls_kwargs[k] = _cfg 
+                cls_kwargs[k] = _cfg
 
         elif isinstance(_k, dict):
             if 'type' not in _k.keys():
@@ -135,7 +146,7 @@ def create(type_or_name, **kwargs):
             # TODO modified inspace, maybe get wrong result for using `> 1`
             _cfg: dict = GLOBAL_CONFIG[_type]
             # _cfg_copy = copy.deepcopy(_cfg)
-            _cfg.update(_k) # update 
+            _cfg.update(_k) # update
             cls_kwargs[k] = create(_type)
             # _cfg.update(_cfg_copy) # resume
 
@@ -144,6 +155,9 @@ def create(type_or_name, **kwargs):
 
 
     cls_kwargs = {n: cls_kwargs[n] for n in arg_names}
+
+    # [保险] 再次更新，确保不被 inject 覆盖
+    cls_kwargs.update(kwargs)
 
     return cls(**cls_kwargs)
 
@@ -155,7 +169,8 @@ def load_config(file_path, cfg=dict()):
     _, ext = os.path.splitext(file_path)
     assert ext in ['.yml', '.yaml'], "only support yaml files for now"
 
-    with open(file_path) as f:
+    # [关键修复] 增加 encoding='utf-8'，解决 Windows 下中文乱码报错
+    with open(file_path, encoding='utf-8') as f:
         file_cfg = yaml.load(f, Loader=yaml.Loader)
         if file_cfg is None:
             return {}
@@ -169,7 +184,8 @@ def load_config(file_path, cfg=dict()):
             if not base_yaml.startswith('/'):
                 base_yaml = os.path.join(os.path.dirname(file_path), base_yaml)
 
-            with open(base_yaml) as f:
+            # [关键修复] 这里也要加 encoding='utf-8'
+            with open(base_yaml, encoding='utf-8') as f:
                 base_cfg = load_config(base_yaml, cfg)
                 merge_config(base_cfg, cfg)
 
@@ -201,8 +217,5 @@ def merge_config(config, another_cfg=None):
     """
     global GLOBAL_CONFIG
     dct = GLOBAL_CONFIG if another_cfg is None else another_cfg
-    
+
     return merge_dict(dct, config)
-
-
-
