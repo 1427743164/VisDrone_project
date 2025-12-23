@@ -67,7 +67,7 @@ class RTDETRPostProcessor(nn.Module):
         for lab, box, sco in zip(labels, boxes, scores):
             result = dict(labels=lab, boxes=box, scores=sco)
             results.append(result)
-        
+
         return results
         
 
