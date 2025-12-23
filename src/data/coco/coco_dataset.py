@@ -112,11 +112,8 @@ class ConvertCocoPolysToMask(object):
             classes = [mscoco_category2label[obj["category_id"]] for obj in anno]
         else:
             classes = [obj["category_id"] for obj in anno]
-            
-        classes = torch.tensor(classes, dtype=torch.int64)
 
-        if len(classes) > 0 and classes.min() == 1 and classes.max() == 10:
-            classes -= 1  # 1-10 -> 0-9
+        classes = torch.tensor(classes, dtype=torch.int64)
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
@@ -155,7 +152,7 @@ class ConvertCocoPolysToMask(object):
 
         target["orig_size"] = torch.as_tensor([int(w), int(h)])
         target["size"] = torch.as_tensor([int(w), int(h)])
-    
+
         return image, target
 
 

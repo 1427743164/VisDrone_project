@@ -14,7 +14,7 @@ from src.misc import logger
 from src.core import yaml_utils
 from src.zoo.rtdetr.utils import inverse_sigmoid
 
-# [关键修改] 显式导入 CocoEvaluator，而不是通过 logger 导入
+# [关键修改] 显式导入 CocoEvaluator
 from src.data.coco.coco_eval import CocoEvaluator
 
 from tqdm import tqdm
@@ -29,12 +29,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', logger.SmoothedValue(window_size=1, fmt='{value:.6f}'))
 
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = kwargs.get('print_freq', 10)
 
     ema = kwargs.get('ema', None)
     scaler = kwargs.get('scaler', None)
 
-    pbar = tqdm(data_loader, desc=header, file=sys.stdout)
+    # [修复] 限制列宽 ncols=100 防止自动换行导致的抽搐，mininterval限制刷新率
+    pbar = tqdm(data_loader, desc=header, file=sys.stdout, ncols=110, mininterval=0.5)
 
     for samples, targets in pbar:
         samples = samples.to(device)
@@ -43,43 +43,34 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if scaler is not None:
             with torch.amp.autocast('cuda', enabled=True):
                 outputs = model(samples, targets)
-
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
             scaler.scale(losses).backward()
-
             if max_norm > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-
         else:
             outputs = model(samples, targets)
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-
             optimizer.zero_grad()
             losses.backward()
-
             if max_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-
             optimizer.step()
 
         if ema is not None:
             ema.update(model)
 
         loss_dict_reduced = logger.reduce_dict(loss_dict)
-        loss_dict_reduced_unscaled = {f'{k}_unscaled': v
-                                      for k, v in loss_dict_reduced.items()}
-        loss_dict_reduced_scaled = {k: v * weight_dict[k]
-                                    for k, v in loss_dict_reduced.items() if k in weight_dict}
+        loss_dict_reduced_unscaled = {f'{k}_unscaled': v for k, v in loss_dict_reduced.items()}
+        loss_dict_reduced_scaled = {k: v * weight_dict[k] for k, v in loss_dict_reduced.items() if k in weight_dict}
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
 
         loss_value = losses_reduced_scaled.item()
@@ -92,25 +83,22 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-        # ================== 【开始修改区域】 ==================
-        # 1. 获取当前保留的显存 (Reserved Memory)，这最接近 nvidia-smi 看到的占用
-        mem = ""
+        # ================== 【修复显存显示】 ==================
+        # 1. 缩短显示的字符串 (12.5G -> 12G)
+        # 2. 放在 postfix 里，键名缩短为 'M'
+        mem_str = ""
         if torch.cuda.is_available():
-            mem = f"{torch.cuda.memory_reserved() / 1E9:.3g}G"
+            # 保留1位小数即可，太长会挤
+            mem_str = f"{torch.cuda.memory_reserved() / 1E9:.1f}G"
 
-        # 2. 更新进度条后缀，加入 'mem' 字段
-        pbar.set_postfix({
-            'loss': f"{loss_value:.4f}",
-            'lr': f"{optimizer.param_groups[0]['lr']:.6f}",
-            'mem': mem  # <--- 在这里显示显存
-        })
-        # ================== 【结束修改区域】 ==================
+        pbar.set_postfix(loss=f"{loss_value:.3f}", lr=f"{optimizer.param_groups[0]['lr']:.5f}", M=mem_str)
+        # ================== 【结束修复】 ==================
 
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-
+# ... evaluate 函数保持不变 ...
 @torch.no_grad()
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir):
     model.eval()
@@ -119,24 +107,20 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     metric_logger = logger.MetricLogger(delimiter="  ")
     header = 'Test:'
 
-    pbar = tqdm(data_loader, desc=header, file=sys.stdout)
+    pbar = tqdm(data_loader, desc=header, file=sys.stdout, ncols=110) # 加上 ncols 防止验证时也抽搐
 
     if hasattr(postprocessors, 'keys'):
         iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
     else:
         iou_types = ('bbox',)
 
-    # [关键修改] 直接使用导入的 CocoEvaluator 类，而不是 logger.CocoEvaluator
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
-
-    panoptic_evaluator = None
 
     for samples, targets in pbar:
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         outputs = model(samples)
-
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
 
         if hasattr(postprocessors, 'keys') and 'bbox' in postprocessors.keys():
@@ -153,13 +137,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     print("Averaged stats:", metric_logger)
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
-
-    if coco_evaluator is not None:
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
 
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
     if coco_evaluator is not None:
         if 'bbox' in iou_types:
             stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
