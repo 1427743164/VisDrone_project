@@ -115,6 +115,9 @@ class ConvertCocoPolysToMask(object):
             
         classes = torch.tensor(classes, dtype=torch.int64)
 
+        if len(classes) > 0 and classes.min() == 1 and classes.max() == 10:
+            classes -= 1  # 1-10 -> 0-9
+
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
             masks = convert_coco_poly_to_mask(segmentations, h, w)

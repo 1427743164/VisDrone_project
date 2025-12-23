@@ -92,10 +92,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
+        # ================== 【开始修改区域】 ==================
+        # 1. 获取当前保留的显存 (Reserved Memory)，这最接近 nvidia-smi 看到的占用
+        mem = ""
+        if torch.cuda.is_available():
+            mem = f"{torch.cuda.memory_reserved() / 1E9:.3g}G"
+
+        # 2. 更新进度条后缀，加入 'mem' 字段
         pbar.set_postfix({
             'loss': f"{loss_value:.4f}",
-            'lr': f"{optimizer.param_groups[0]['lr']:.6f}"
+            'lr': f"{optimizer.param_groups[0]['lr']:.6f}",
+            'mem': mem  # <--- 在这里显示显存
         })
+        # ================== 【结束修改区域】 ==================
 
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
