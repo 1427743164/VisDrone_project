@@ -1,4 +1,9 @@
 # W-RT-DETR VisDrone Configuration
+# [稳定性修复版]
+# 1. 增加 clip_max_norm 防止梯度爆炸
+# 2. 降低初始学习率，适应从头训练
+# 3. 移除 RandomIoUCrop 防止卡死
+
 __include__: [
   'visdrone_detection.yml',
   'runtime.yml',
@@ -6,6 +11,7 @@ __include__: [
 
 output_dir: ./output/w_rtdetr_visdrone_final
 
+# --- 模型架构 ---
 model:
   type: WRTDETR
   backbone_depth: 18
@@ -13,9 +19,11 @@ model:
   hidden_dim: 256
   num_queries: 300
 
+# --- 损失函数 & 匹配器 ---
 criterion:
   type: SetCriterion
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2}
+  # [调整] NWD权重稍微降低一点，防止它主导梯度
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 1}
   losses: ['vfl', 'boxes', 'nwd']
   matcher:
     type: FrequencySinkhornMatcher
@@ -24,12 +32,7 @@ criterion:
     cost_nwd: 5.0
     iter_steps: 20
 
-postprocessor:
-  type: RTDETRPostProcessor
-  num_classes: 10
-  use_focal_loss: True
-  num_top_queries: 300
-
+# --- 优化器 (关键修改) ---
 optimizer:
   type: AdamW
   params:
@@ -38,31 +41,38 @@ optimizer:
       lr: 0.00001
     -
       params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
-      lr: 0.0001
+      # [降低] 从 0.0001 降到 0.00005，防止初期震荡
+      lr: 0.00005
   weight_decay: 0.0001
+
+# --- 梯度裁剪 (救命稻草) ---
+# 必须加上这个！防止 Loss 突然翻倍
+clip_max_norm: 0.1
 
 lr_scheduler:
   type: CosineAnnealingLR
   T_max: 72
   eta_min: 0.0
 
+# --- 数据加载 ---
 train_dataloader:
   dataset:
     transforms:
       ops:
         - {type: RandomPhotometricDistort, p: 0.5}
         - {type: RandomZoomOut, fill: 0}
-#        - {type: RandomIoUCrop, p: 0.8}
+        # - {type: RandomIoUCrop, p: 0.8} # 保持关闭
         - {type: SanitizeBoundingBox, min_size: 1}
         - {type: RandomHorizontalFlip}
         - {type: Resize, size: [640, 640]}
-
-        # [🚨 关键修复] 必须加上这一行！
-        # 1. out_fmt='cxcywh': 把 xyxy 转为 中心点+宽高 (DETR需要)
-        # 2. normalize=True: 把 0-640 转为 0-1 (解决 Loss 爆炸)
+        # 保持 ConvertBox 开启
         - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
-
         - {type: ToImageTensor}
         - {type: ConvertDtype}
+
+# 开启 EMA (指数移动平均)，让模型更稳定
+ema:
+  decay: 0.9999
+  warmups: 2000
 
 epoches: 72
