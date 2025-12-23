@@ -1,9 +1,4 @@
 # W-RT-DETR VisDrone Configuration
-# 核心策略：
-# 1. 优化器：AdamW + Cosine Annealing
-# 2. 数据增强：VisDrone 目标太密，关闭 Mosaic，防止小目标被截断
-# 3. Loss：启用 NWD Loss
-
 __include__: [
   'visdrone_detection.yml',
   'runtime.yml',
@@ -11,19 +6,17 @@ __include__: [
 
 output_dir: ./output/w_rtdetr_visdrone_final
 
-# --- 模型架构定义 ---
 model:
-  type: WRTDETR # 对应 models/w_rtdetr.py 中的类名
+  type: WRTDETR
   backbone_depth: 50
-  num_classes: 10 # VisDrone 有 10 类
+  num_classes: 10
   hidden_dim: 256
   num_queries: 300
 
-# --- 损失函数 & 匹配器 ---
 criterion:
   type: SetCriterion
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2} # 启用 loss_nwd
-  losses: ['vfl', 'boxes', 'nwd'] # 注册 nwd
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2}
+  losses: ['vfl', 'boxes', 'nwd']
   matcher:
     type: FrequencySinkhornMatcher
     cost_class: 2.0
@@ -31,31 +24,28 @@ criterion:
     cost_nwd: 5.0
     iter_steps: 20
 
-# --- 后处理器 (关键修复：验证集评估必需) ---
 postprocessor:
   type: RTDETRPostProcessor
   num_classes: 10
   use_focal_loss: True
   num_top_queries: 300
 
-# --- 训练超参数 ---
 optimizer:
   type: AdamW
   params:
     -
       params: '^(?=.*backbone)(?!.*norm).*$'
-      lr: 0.00001 # Backbone 学习率更低
+      lr: 0.00001
     -
       params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
-      lr: 0.0001  # 新模块学习率正常
+      lr: 0.0001
   weight_decay: 0.0001
 
 lr_scheduler:
   type: CosineAnnealingLR
-  T_max: 72 # 72 epochs
+  T_max: 72
   eta_min: 0.0
 
-# --- 数据加载 ---
 train_dataloader:
   dataset:
     transforms:
@@ -66,7 +56,12 @@ train_dataloader:
         - {type: SanitizeBoundingBox, min_size: 1}
         - {type: RandomHorizontalFlip}
         - {type: Resize, size: [640, 640]}
-        # 必须加上这两步，把图片转为 Tensor 并归一化
+
+        # [🚨 关键修复] 必须加上这一行！
+        # 1. out_fmt='cxcywh': 把 xyxy 转为 中心点+宽高 (DETR需要)
+        # 2. normalize=True: 把 0-640 转为 0-1 (解决 Loss 爆炸)
+        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+
         - {type: ToImageTensor}
         - {type: ConvertDtype}
 

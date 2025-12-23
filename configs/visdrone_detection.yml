@@ -1,68 +1,42 @@
-# W-RT-DETR VisDrone Configuration
-__include__: [
-  'visdrone_detection.yml',
-  'runtime.yml',
-]
+task: detection
 
-output_dir: ./output/w_rtdetr_visdrone_final
-
-model:
-  type: WRTDETR
-  backbone_depth: 50
-  num_classes: 10
-  hidden_dim: 256
-  num_queries: 300 
-
-criterion:
-  type: SetCriterion
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 2}
-  losses: ['vfl', 'boxes', 'nwd']
-  matcher:
-    type: FrequencySinkhornMatcher 
-    cost_class: 2.0
-    cost_bbox: 5.0
-    cost_nwd: 5.0
-    iter_steps: 20
-
-postprocessor:
-  type: RTDETRPostProcessor
-  num_classes: 10
-  use_focal_loss: True
-  num_top_queries: 300
-
-optimizer:
-  type: AdamW
-  params:
-    -
-      params: '^(?=.*backbone)(?!.*norm).*$'
-      lr: 0.00001
-    -
-      params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
-      lr: 0.0001
-  weight_decay: 0.0001
-
-lr_scheduler:
-  type: CosineAnnealingLR
-  T_max: 72
-  eta_min: 0.0
+num_classes: 10 # VisDrone 类别数
+remap_mscoco_category: False
 
 train_dataloader:
+  type: DataLoader
   dataset:
+    type: CocoDetection
+    # 指向你的训练集图片
+    img_folder: ./datasets/VisDrone2019-DET-train/images
+    # 指向你的 COCO 格式标注文件 (必须是 JSON)
+    ann_file: ./datasets/VisDrone2019-DET-train/train.json
+    return_masks: False
     transforms:
-      ops:
-        - {type: RandomPhotometricDistort, p: 0.5}
-        - {type: RandomZoomOut, fill: 0}
-        - {type: RandomIoUCrop, p: 0.8}
-        - {type: SanitizeBoundingBox, min_size: 1}
-        - {type: RandomHorizontalFlip}
-        - {type: Resize, size: [640, 640]}
-        
-        # [🚨 关键修复] 必须加上这一行！
-        # 1. out_fmt='cxcywh': 把 xyxy 转为 中心点+宽高 (DETR需要)
-        # 2. normalize=True: 把 0-640 转为 0-1 (解决 Loss 爆炸)
-        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True} 
-        
-        - {type: ToImageTensor} 
-        - {type: ConvertDtype} 
+      type: Compose
+      ops: ~ # 训练集的 transforms 在 w_rtdetr_visdrone.yml 里定义了，这里留空没关系
+  shuffle: True
+  batch_size: 4 # 根据显存调整
+  num_workers: 4
+  drop_last: True
+  collate_fn: default_collate_fn
 
-epoches: 72
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: ./datasets/VisDrone2019-DET-val/images
+    ann_file: ./datasets/VisDrone2019-DET-val/val.json
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        # [关键修复] 验证集必须有 transforms！否则加载的是 PIL Image 会报错
+        - {type: Resize, size: [640, 640]} # 必须统一尺寸才能 batch
+        - {type: ToImageTensor}            # 转为 Tensor
+        - {type: ConvertDtype}             # 转为 Float 并归一化
+  shuffle: False
+  batch_size: 4
+  num_workers: 4
+  drop_last: False
+  collate_fn: default_collate_fn
