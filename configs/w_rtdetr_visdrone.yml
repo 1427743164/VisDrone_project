@@ -1,27 +1,105 @@
-# W-RT-DETR VisDrone Configuration
-# [完整修复版]
-# 1. 包含防爆设置 (Clip Norm, Low LR)
-# 2. [补回] PostProcessor 配置 (解决 NoneType 报错)
+## W-RT-DETR VisDrone Configuration
+## [完整修复版]
+## 1. 包含防爆设置 (Clip Norm, Low LR)
+## 2. [补回] PostProcessor 配置 (解决 NoneType 报错)
+#
+#__include__: [
+#  'visdrone_detection.yml',
+#  'runtime.yml',
+#]
+#
+#output_dir: ./output/w_rtdetr_visdrone_final
+#
+## --- 模型架构 ---
+#model:
+#  type: WRTDETR
+#  backbone_depth: 50
+#  num_classes: 10
+#  hidden_dim: 256
+#  num_queries: 300
+#
+## --- 损失函数 & 匹配器 ---
+#criterion:
+#  type: SetCriterion
+#  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 1}
+#  losses: ['vfl', 'boxes', 'nwd']
+#  matcher:
+#    type: FrequencySinkhornMatcher
+#    cost_class: 2.0
+#    cost_bbox: 5.0
+#    cost_nwd: 5.0
+#    iter_steps: 20
+#
+## --- [补回] 后处理器 (之前漏了这里) ---
+#postprocessor:
+#  type: RTDETRPostProcessor
+#  num_classes: 10
+#  use_focal_loss: True
+#  num_top_queries: 300
+#
+## --- 优化器 ---
+#optimizer:
+#  type: AdamW
+#  params:
+#    -
+#      params: '^(?=.*backbone)(?!.*norm).*$'
+#      lr: 0.00001
+#    -
+#      params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
+#      lr: 0.00005 # 保持低学习率求稳
+#  weight_decay: 0.0001
+#
+## --- 梯度裁剪 ---
+#clip_max_norm: 0.1
+#
+#lr_scheduler:
+#  type: CosineAnnealingLR
+#  T_max: 72
+#  eta_min: 0.0
+#
+## --- 数据加载 ---
+#train_dataloader:
+#  dataset:
+#    transforms:
+#      ops:
+#        - {type: RandomPhotometricDistort, p: 0.5}
+#        - {type: RandomZoomOut, fill: 0}
+#        # - {type: RandomIoUCrop, p: 0.8} # 保持关闭
+#        - {type: SanitizeBoundingBox, min_size: 1}
+#        - {type: RandomHorizontalFlip}
+#        - {type: Resize, size: [640, 640]}
+#        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+#        - {type: ToImageTensor}
+#        - {type: ConvertDtype}
+#
+## --- EMA ---
+#ema:
+#  decay: 0.9999
+#  warmups: 2000
+#
+#epoches: 72
 
+
+#4090
 __include__: [
   'visdrone_detection.yml',
   'runtime.yml',
 ]
 
-output_dir: ./output/w_rtdetr_visdrone_final
+output_dir: ./output/w_rtdetr_visdrone_4090_run
 
-# --- 模型架构 ---
 model:
   type: WRTDETR
-  backbone_depth: 50
+  backbone_depth: 50      # 或 101，4090 带 R101 没问题
   num_classes: 10
   hidden_dim: 256
   num_queries: 300
+  # [重点] 设置为 False 以开启 BN 训练，适应你的大 Batch
+  freeze_backbone_norm: False
 
-# --- 损失函数 & 匹配器 ---
 criterion:
   type: SetCriterion
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 1}
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 1} # 保持 NWD 权重为 1 求稳
   losses: ['vfl', 'boxes', 'nwd']
   matcher:
     type: FrequencySinkhornMatcher
@@ -30,26 +108,29 @@ criterion:
     cost_nwd: 5.0
     iter_steps: 20
 
-# --- [补回] 后处理器 (之前漏了这里) ---
 postprocessor:
   type: RTDETRPostProcessor
   num_classes: 10
   use_focal_loss: True
   num_top_queries: 300
 
-# --- 优化器 ---
 optimizer:
   type: AdamW
   params:
     -
+      # 对于 Backbone，因为解冻了 BN，建议给一个稍小的学习率
       params: '^(?=.*backbone)(?!.*norm).*$'
       lr: 0.00001
     -
+      # 专门针对 BN 层参数，给予学习率
+      params: '^(?=.*backbone)(?=.*norm).*$'
+      lr: 0.00001
+    -
       params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
-      lr: 0.00005 # 保持低学习率求稳
+      lr: 0.0001 # 算力够大，Batch够大时，LR 可以回到 1e-4
   weight_decay: 0.0001
 
-# --- 梯度裁剪 ---
+# 4090 上通常不需要太激进的 Clip，但保留 0.1 绝对安全
 clip_max_norm: 0.1
 
 lr_scheduler:
@@ -57,14 +138,18 @@ lr_scheduler:
   T_max: 72
   eta_min: 0.0
 
-# --- 数据加载 ---
 train_dataloader:
+  # [重点] 4090 上，Batch Size 拉大
+  batch_size: 8   # R50 可以尝试 12 或 16；R101 建议 8
+  num_workers: 8  # Linux 上开 4-8 个 worker 加速加载
   dataset:
     transforms:
       ops:
         - {type: RandomPhotometricDistort, p: 0.5}
         - {type: RandomZoomOut, fill: 0}
-        # - {type: RandomIoUCrop, p: 0.8} # 保持关闭
+        # 4090 性能强，内存大，可以尝试把 IoUCrop 打开，
+        # 但如果是为了绝对稳定，建议用普通的 RandomCrop 或者保持关闭
+        # - {type: RandomIoUCrop, p: 0.8}
         - {type: SanitizeBoundingBox, min_size: 1}
         - {type: RandomHorizontalFlip}
         - {type: Resize, size: [640, 640]}
@@ -72,7 +157,6 @@ train_dataloader:
         - {type: ToImageTensor}
         - {type: ConvertDtype}
 
-# --- EMA ---
 ema:
   decay: 0.9999
   warmups: 2000
