@@ -1,8 +1,7 @@
 # W-RT-DETR VisDrone Configuration
-# [稳定性修复版]
-# 1. 增加 clip_max_norm 防止梯度爆炸
-# 2. 降低初始学习率，适应从头训练
-# 3. 移除 RandomIoUCrop 防止卡死
+# [完整修复版]
+# 1. 包含防爆设置 (Clip Norm, Low LR)
+# 2. [补回] PostProcessor 配置 (解决 NoneType 报错)
 
 __include__: [
   'visdrone_detection.yml',
@@ -14,7 +13,7 @@ output_dir: ./output/w_rtdetr_visdrone_final
 # --- 模型架构 ---
 model:
   type: WRTDETR
-  backbone_depth: 18
+  backbone_depth: 50
   num_classes: 10
   hidden_dim: 256
   num_queries: 300
@@ -22,7 +21,6 @@ model:
 # --- 损失函数 & 匹配器 ---
 criterion:
   type: SetCriterion
-  # [调整] NWD权重稍微降低一点，防止它主导梯度
   weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_nwd: 1}
   losses: ['vfl', 'boxes', 'nwd']
   matcher:
@@ -32,7 +30,14 @@ criterion:
     cost_nwd: 5.0
     iter_steps: 20
 
-# --- 优化器 (关键修改) ---
+# --- [补回] 后处理器 (之前漏了这里) ---
+postprocessor:
+  type: RTDETRPostProcessor
+  num_classes: 10
+  use_focal_loss: True
+  num_top_queries: 300
+
+# --- 优化器 ---
 optimizer:
   type: AdamW
   params:
@@ -41,12 +46,10 @@ optimizer:
       lr: 0.00001
     -
       params: '^(?=.*encoder|decoder|query_selector)(?!.*norm).*$'
-      # [降低] 从 0.0001 降到 0.00005，防止初期震荡
-      lr: 0.00005
+      lr: 0.00005 # 保持低学习率求稳
   weight_decay: 0.0001
 
-# --- 梯度裁剪 (救命稻草) ---
-# 必须加上这个！防止 Loss 突然翻倍
+# --- 梯度裁剪 ---
 clip_max_norm: 0.1
 
 lr_scheduler:
@@ -65,12 +68,11 @@ train_dataloader:
         - {type: SanitizeBoundingBox, min_size: 1}
         - {type: RandomHorizontalFlip}
         - {type: Resize, size: [640, 640]}
-        # 保持 ConvertBox 开启
         - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
         - {type: ToImageTensor}
         - {type: ConvertDtype}
 
-# 开启 EMA (指数移动平均)，让模型更稳定
+# --- EMA ---
 ema:
   decay: 0.9999
   warmups: 2000
