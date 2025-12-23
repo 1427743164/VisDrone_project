@@ -14,18 +14,15 @@ def get_contrastive_denoising_training_group(targets,
                                              label_noise_ratio,
                                              box_noise_scale,
                                              class_embed,
-                                             num_anchors=None): # [关键修复] 补上 num_anchors 参数
+                                             num_anchors=None):
     """
-    完全体 Contrastive DeNoising (CDN) 逻辑
-    作用：在训练阶段生成带噪声的 Ground Truth Queries，加速模型收敛。
+    [修复版] CDN 逻辑
+    修复：返回归一化的 box (0-1)，不再返回 logits，以便与 Encoder 输出对齐。
     """
     if num_denoising <= 0:
         return None, None, None, None
 
-    # 如果没有显式传入 num_anchors，则默认使用 300 (RT-DETR 默认值)
-    # W-RT-DETR 会传入实际的 topk 数量
     num_queries = num_anchors if num_anchors is not None else 300
-
     num_gts = [len(t['labels']) for t in targets]
     device = targets[0]['labels'].device
 
@@ -33,18 +30,15 @@ def get_contrastive_denoising_training_group(targets,
     if max_gt_num == 0:
         return None, None, None, None
 
-    # 计算组数：每一组包含正样本和负样本
     num_group = num_denoising // max_gt_num
     num_group = 1 if num_group == 0 else num_group
 
     bs = len(num_gts)
 
-    # 初始化噪声 Query (类别填充为背景类 num_classes)
     input_query_class = torch.full([bs, max_gt_num], num_classes, dtype=torch.int32, device=device)
     input_query_bbox = torch.zeros([bs, max_gt_num, 4], device=device)
     pad_gt_mask = torch.zeros([bs, max_gt_num], dtype=torch.bool, device=device)
 
-    # 将真实的 GT 信息填入
     for i in range(bs):
         num_gt = num_gts[i]
         if num_gt > 0:
@@ -52,12 +46,10 @@ def get_contrastive_denoising_training_group(targets,
             input_query_bbox[i, :num_gt] = targets[i]['boxes']
             pad_gt_mask[i, :num_gt] = 1
 
-    # 扩展组数
     input_query_class = input_query_class.tile([1, 2 * num_group])
     input_query_bbox = input_query_bbox.tile([1, 2 * num_group, 1])
     pad_gt_mask = pad_gt_mask.tile([1, 2 * num_group])
 
-    # 构建正负样本掩码
     negative_gt_mask = torch.zeros([bs, max_gt_num * 2, 1], device=device)
     negative_gt_mask[:, max_gt_num:] = 1
     negative_gt_mask = negative_gt_mask.tile([1, num_group, 1])
@@ -69,13 +61,11 @@ def get_contrastive_denoising_training_group(targets,
 
     num_denoising = int(max_gt_num * 2 * num_group)
 
-    # 1. 添加类别噪声 (Label Noise)
     if label_noise_ratio > 0:
         mask = torch.rand_like(input_query_class, dtype=torch.float) < (label_noise_ratio * 0.5)
         new_label = torch.randint_like(mask, 0, num_classes, dtype=input_query_class.dtype)
         input_query_class = torch.where(mask & pad_gt_mask, new_label, input_query_class)
 
-    # 2. 添加位置噪声 (Box Noise)
     if box_noise_scale > 0:
         known_bbox = box_cxcywh_to_xyxy(input_query_bbox)
         diff = torch.tile(input_query_bbox[..., 2:] * 0.5, [1, 1, 2]) * box_noise_scale
@@ -86,19 +76,15 @@ def get_contrastive_denoising_training_group(targets,
         known_bbox += rand_part * diff
         known_bbox.clip_(min=0.0, max=1.0)
         input_query_bbox = box_xyxy_to_cxcywh(known_bbox)
-        input_query_bbox = inverse_sigmoid(input_query_bbox)
+        # [关键修改] 移除 inverse_sigmoid，直接返回 [0, 1] 的框
+        # input_query_bbox = inverse_sigmoid(input_query_bbox)
 
-    # 3. 映射到特征空间
     input_query_class = class_embed(input_query_class)
 
-    # 4. 构建 Attention Mask (关键逻辑：防止泄露)
     tgt_size = num_denoising + num_queries
     attn_mask = torch.full([tgt_size, tgt_size], False, dtype=torch.bool, device=device)
-
-    # 正常匹配 Query 不能看到去噪 Query
     attn_mask[num_denoising:, :num_denoising] = True
 
-    # 不同组的去噪 Query 之间互不可见
     for i in range(num_group):
         if i == 0:
             attn_mask[max_gt_num * 2 * i: max_gt_num * 2 * (i + 1), max_gt_num * 2 * (i + 1): num_denoising] = True

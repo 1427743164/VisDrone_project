@@ -3,31 +3,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from src.core import register
 
-# --- 引入项目魔改模块 ---
+# 引入工具
+from src.zoo.rtdetr.utils import inverse_sigmoid  # [关键] 引入 inverse_sigmoid
+
 from models.backbones.presnet_wavelet import WaveletPResNet
 from models.necks.spectral_mamba_encoder import SpectralMambaEncoder
 from models.layers.density_selector import DensityGuidedQuerySelection
 from models.matchers.freq_sinkhorn_matcher import FrequencySinkhornMatcher
 
-# --- 引入核心组件 ---
 try:
     from src.zoo.rtdetr.rtdetr_decoder import RTDETRTransformerDecoder
     from src.zoo.rtdetr.rtdetr_postprocessor import RTDETRPostProcessor
     from src.zoo.rtdetr.rtdetr_criterion import SetCriterion
-    # CDN 核心工具
     from src.zoo.rtdetr.denoising import get_contrastive_denoising_training_group
 except ImportError:
-    print("Warning: Standard RT-DETR modules not found. Ensure you are in the project root.")
+    print("Warning: Standard RT-DETR modules not found.")
 
 
 @register
 class WRTDETR(nn.Module):
     """
-    [终极完全体 v3.3] W-RT-DETR
+    [终极完全体 v3.5] W-RT-DETR
     修复内容：
-    1. 修正 torch.split 参数传递错误 (解决 TypeError: must be tuple of ints)
-    2. 保持所有属性 (num_classes, hidden_dim) 完整
-    3. 保持 Embedding 输入类型匹配
+    1. 修正 Box 解码逻辑：使用 (delta + inv(ref)).sigmoid()，防止出现负框导致的 AssertionError
+    2. bbox_embed 去除 Sigmoid，输出 Logits
     """
 
     def __init__(self,
@@ -39,13 +38,11 @@ class WRTDETR(nn.Module):
                  eval_spatial_size=[640, 640]):
         super().__init__()
 
-        # 保存属性
         self.num_classes = num_classes
         self.hidden_dim = hidden_dim
         self.num_queries = num_queries
         self.num_decoder_layers = num_decoder_layers
 
-        # 1. Backbone
         self.backbone = WaveletPResNet(
             depth=backbone_depth,
             return_idx=[1, 2, 3],
@@ -53,55 +50,46 @@ class WRTDETR(nn.Module):
             freeze_norm=True
         )
 
-        # 2. Encoder (Mamba)
         self.encoder = SpectralMambaEncoder(
             in_channels=[512, 1024, 2048],
             hidden_dim=hidden_dim,
             encoder_idx=[1, 2]
         )
 
-        # 3. Query Selector
         self.query_selector = DensityGuidedQuerySelection(
             num_queries=num_queries,
             alpha=0.4
         )
 
-        # 4. Heads
-        # [输出头] Feature -> Class Score (接受 Float)
         self.class_embed = nn.Linear(hidden_dim, num_classes)
+
+        # [关键修改] 移除 Sigmoid，因为我们需要预测未归一化的偏移量 (Delta)
         self.bbox_embed = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 4),
-            nn.Sigmoid()
+            nn.Linear(hidden_dim, 4)
         )
 
-        # [输入头] Label ID -> Feature (接受 Int) - 用于 CDN
         self.denoising_class_embed = nn.Embedding(num_classes + 1, hidden_dim, padding_idx=num_classes)
 
-        # 5. Decoder
         self.decoder = RTDETRTransformerDecoder(
             hidden_dim=hidden_dim,
             num_decoder_layers=num_decoder_layers,
             num_head=8
         )
 
-        # 6. CDN 配置
         self.num_denoising = 100
         self.label_noise_ratio = 0.5
         self.box_noise_scale = 1.0
 
-        # Init bias
         prior_prob = 0.01
         bias_value = -torch.log(torch.tensor((1 - prior_prob) / prior_prob))
         nn.init.constant_(self.class_embed.bias, bias_value)
 
     def forward(self, x, targets=None):
-        # --- 1. Backbone & Encoder ---
         feats = self.backbone(x)
         feats = self.encoder(feats)
 
-        # --- 2. Prepare Features ---
         multi_scale_feats = []
         spatial_shapes = []
         for feat in feats:
@@ -112,18 +100,17 @@ class WRTDETR(nn.Module):
         enc_memory = torch.cat(multi_scale_feats, dim=1)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=x.device)
 
-        # Encoder outputs
         enc_outputs_class = self.class_embed(enc_memory)
-        enc_outputs_coord = self.bbox_embed(enc_memory)
 
-        # --- 3. Density Selection ---
+        # [关键逻辑] Encoder 输出也需要 Sigmoid (因为 bbox_embed 现在没有 Sigmoid 了)
+        enc_outputs_coord = self.bbox_embed(enc_memory).sigmoid()
+
         topk_ind, topk_score = self.query_selector(enc_memory, enc_outputs_class, spatial_shapes)
 
         batch_idx = torch.arange(len(topk_ind), device=topk_ind.device).unsqueeze(1)
         ref_points = enc_outputs_coord[batch_idx, topk_ind]
         tgt = enc_memory[batch_idx, topk_ind]
 
-        # --- 4. CDN Logic ---
         dn_meta = None
         if self.training and targets is not None:
             dn_output = get_contrastive_denoising_training_group(
@@ -133,16 +120,16 @@ class WRTDETR(nn.Module):
                 self.hidden_dim,
                 self.label_noise_ratio,
                 self.box_noise_scale,
-                self.denoising_class_embed,  # 传入 Embedding 层
+                self.denoising_class_embed,
                 num_anchors=topk_ind.shape[1]
             )
             input_query_class, input_query_bbox, attn_mask, dn_meta = dn_output
             tgt = torch.cat([input_query_class, tgt], dim=1)
+            # 这里的 ref_points 都是 [0, 1] 区间，可以直接拼接
             ref_points = torch.cat([input_query_bbox, ref_points], dim=1)
         else:
             attn_mask = None
 
-        # --- 5. Decoder ---
         dec_out_stack, dec_ref_points = self.decoder(
             tgt=tgt,
             ref_points=ref_points,
@@ -151,20 +138,29 @@ class WRTDETR(nn.Module):
             tgt_mask=attn_mask
         )
 
-        # --- 6. Prediction ---
+        # --- 6. Prediction Heads (修正后的坐标解码) ---
         outputs_class = self.class_embed(dec_out_stack)
-        outputs_coord = self.bbox_embed(dec_out_stack) + dec_ref_points
+
+        # [核心修复] 使用标准的 DETR 坐标细化公式
+        # ref_points 是 [0, 1]，先转回 logits (inverse_sigmoid)
+        # 然后加上网络预测的偏移量 (bbox_embed)
+        # 最后再 sigmoid 变回 [0, 1]
+        # 这样保证了输出框永远在 [0, 1] 范围内，不会出现负数，解决了 AssertionError
+        tmp = self.bbox_embed(dec_out_stack)
+        tmp += inverse_sigmoid(dec_ref_points)
+        outputs_coord = tmp.sigmoid()
 
         # --- 7. Split & Loss ---
         if self.training and dn_meta is not None:
-            # [关键修复] dn_meta['dn_num_split'] 本身就是 [100, 300] 这样的列表，直接传入即可
             dn_out_class, outputs_class = torch.split(outputs_class, dn_meta['dn_num_split'], dim=2)
             dn_out_coord, outputs_coord = torch.split(outputs_coord, dn_meta['dn_num_split'], dim=2)
 
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
             out['aux_outputs'] = self._set_aux_loss(outputs_class[:-1], outputs_coord[:-1])
             out['dn_output'] = {'pred_logits': dn_out_class[-1], 'pred_boxes': dn_out_coord[-1], 'dn_meta': dn_meta}
-            out['dn_aux_outputs'] = self._set_aux_loss(dn_out_class[:-1], dn_out_coord[:-1])
+            out['dn_aux_outputs'] = self._set_aux_loss(dn_out_class, dn_out_coord)
+            out['dn_meta'] = dn_meta
+
         else:
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
 
