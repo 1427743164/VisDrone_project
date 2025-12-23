@@ -3,13 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from src.core import register
 
-# --- 引入之前的魔改模块 ---
+# --- 引入项目魔改模块 ---
 from models.backbones.presnet_wavelet import WaveletPResNet
 from models.necks.spectral_mamba_encoder import SpectralMambaEncoder
 from models.layers.density_selector import DensityGuidedQuerySelection
 from models.matchers.freq_sinkhorn_matcher import FrequencySinkhornMatcher
 
-# --- 引入基础组件 ---
+# --- 引入核心组件 ---
 try:
     from src.zoo.rtdetr.rtdetr_decoder import RTDETRTransformerDecoder
     from src.zoo.rtdetr.rtdetr_postprocessor import RTDETRPostProcessor
@@ -23,14 +23,10 @@ except ImportError:
 @register
 class WRTDETR(nn.Module):
     """
-    [终极完全体 v3.0] W-RT-DETR
-
-    集大成者：
-    1. Wavelet Backbone (保留微小细节)
-    2. Spectral Mamba Encoder (全局感受野 + 显存优化)
-    3. Density Query Selection (强制关注密集区)
-    4. CDN (Contrastive Denoising)
-    5. Deep Supervision (Aux Loss 全开) - 真正的完全体逻辑
+    [终极完全体 v3.1] W-RT-DETR
+    修复内容：
+    1. 补全 self.num_classes 和 self.hidden_dim 属性 (解决 AttributeError)
+    2. 完整保留 Deep Supervision, CDN, Density Selection 逻辑
     """
 
     def __init__(self,
@@ -41,6 +37,12 @@ class WRTDETR(nn.Module):
                  num_decoder_layers=6,
                  eval_spatial_size=[640, 640]):
         super().__init__()
+
+        # [关键修复] 将参数存入 self，供 forward 函数使用
+        self.num_classes = num_classes
+        self.hidden_dim = hidden_dim
+        self.num_queries = num_queries
+        self.num_decoder_layers = num_decoder_layers
 
         # 1. Backbone
         self.backbone = WaveletPResNet(
@@ -79,27 +81,22 @@ class WRTDETR(nn.Module):
             num_head=8
         )
 
-        # 6. Denoising Config (CDN 参数)
+        # 6. CDN 配置
         self.num_denoising = 100
         self.label_noise_ratio = 0.5
         self.box_noise_scale = 1.0
-        self.num_queries = num_queries  # 存一下，后面 split 用
 
-        # Init bias
+        # 初始化 Bias (DETR 系列常用初始化技巧)
         prior_prob = 0.01
         bias_value = -torch.log(torch.tensor((1 - prior_prob) / prior_prob))
         nn.init.constant_(self.class_embed.bias, bias_value)
 
     def forward(self, x, targets=None):
-        # x: [B, 3, H, W]
-
-        # --- 1. Backbone ---
+        # --- 1. Backbone & Encoder ---
         feats = self.backbone(x)
-
-        # --- 2. Encoder (Mamba) ---
         feats = self.encoder(feats)
 
-        # --- 3. Prepare Features ---
+        # --- 2. Prepare Multi-Scale Features ---
         multi_scale_feats = []
         spatial_shapes = []
         for feat in feats:
@@ -107,27 +104,24 @@ class WRTDETR(nn.Module):
             spatial_shapes.append([H, W])
             multi_scale_feats.append(feat.flatten(2).transpose(1, 2))
 
-        # [B, Total_Tokens, C]
         enc_memory = torch.cat(multi_scale_feats, dim=1)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=x.device)
 
-        # Encoder Prediction (for selection)
+        # Encoder outputs for selection
         enc_outputs_class = self.class_embed(enc_memory)
         enc_outputs_coord = self.bbox_embed(enc_memory)
 
-        # --- 4. Density Guided Query Selection ---
-        # 选出 Top-K Query
+        # --- 3. Density Guided Query Selection ---
         topk_ind, topk_score = self.query_selector(enc_memory, enc_outputs_class, spatial_shapes)
 
-        # Gather Content & Position
         batch_idx = torch.arange(len(topk_ind), device=topk_ind.device).unsqueeze(1)
-        ref_points = enc_outputs_coord[batch_idx, topk_ind]  # [B, Nq, 4]
-        tgt = enc_memory[batch_idx, topk_ind]  # [B, Nq, C]
+        ref_points = enc_outputs_coord[batch_idx, topk_ind]
+        tgt = enc_memory[batch_idx, topk_ind]
 
-        # --- 5. Contrastive DeNoising (CDN) 核心逻辑 ---
+        # --- 4. Contrastive DeNoising (CDN) ---
         dn_meta = None
         if self.training and targets is not None:
-            # 生成带噪声的 GT 查询 (Noisy Queries)
+            # 这里的 self.num_classes 现在已被正确定义
             dn_output = get_contrastive_denoising_training_group(
                 targets,
                 self.num_denoising,
@@ -136,21 +130,15 @@ class WRTDETR(nn.Module):
                 self.label_noise_ratio,
                 self.box_noise_scale,
                 self.class_embed,
-                num_anchors=topk_ind.shape[1]  # num_queries
+                num_anchors=topk_ind.shape[1]  # 传入 num_anchors
             )
-
-            # 解包 CDN 数据
             input_query_class, input_query_bbox, attn_mask, dn_meta = dn_output
-
-            # 将 CDN Query 拼接到 正常 Query 前面
             tgt = torch.cat([input_query_class, tgt], dim=1)
             ref_points = torch.cat([input_query_bbox, ref_points], dim=1)
-
         else:
-            attn_mask = None  # 推理模式不需要 mask
+            attn_mask = None
 
-        # --- 6. Decoder ---
-        # [完全体关键] dec_out_stack: [Layers, B, Total_Queries, C]
+        # --- 5. Decoder (Returns Stack) ---
         dec_out_stack, dec_ref_points = self.decoder(
             tgt=tgt,
             ref_points=ref_points,
@@ -159,38 +147,29 @@ class WRTDETR(nn.Module):
             tgt_mask=attn_mask
         )
 
-        # --- 7. Prediction Heads (对每一层都预测!) ---
-        # outputs_class: [Layers, B, Total_Queries, Num_Classes]
+        # --- 6. Prediction Heads ---
         outputs_class = self.class_embed(dec_out_stack)
-        outputs_coord = self.bbox_embed(dec_out_stack) + dec_ref_points  # Broadcasting
+        outputs_coord = self.bbox_embed(dec_out_stack) + dec_ref_points
 
-        # --- 8. Split CDN outputs & Aux Loss ---
+        # --- 7. Split outputs & Aux Loss ---
         if self.training and dn_meta is not None:
-            # 切分 CDN 部分和 真实 Query 部分
-            # 注意维度 dim=2 是 Query 维度 (因为 dim=0 是 Layers)
             dn_out_class, outputs_class = torch.split(outputs_class, [dn_meta['dn_num_split'], self.num_queries], dim=2)
             dn_out_coord, outputs_coord = torch.split(outputs_coord, [dn_meta['dn_num_split'], self.num_queries], dim=2)
 
-            # 主输出：取最后一层 [-1]
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-
-            # [完全体关键] 记录 Auxiliary Outputs (前 L-1 层)
+            # Deep Supervision
             out['aux_outputs'] = self._set_aux_loss(outputs_class[:-1], outputs_coord[:-1])
-
-            # CDN 输出也需要 Aux
+            # CDN Results
             out['dn_output'] = {'pred_logits': dn_out_class[-1], 'pred_boxes': dn_out_coord[-1], 'dn_meta': dn_meta}
             out['dn_aux_outputs'] = self._set_aux_loss(dn_out_class[:-1], dn_out_coord[:-1])
-
         else:
-            # 推理模式，只取最后一层
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
 
-        # 记录 Encoder 输出 (用于 Auxiliary Loss 和 Density Selection Loss)
+        # Encoder Aux
         out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
 
         return out
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord):
-        # 辅助函数：将 stack 转为 list of dict，供 loss 计算使用
         return [{'pred_logits': a, 'pred_boxes': b} for a, b in zip(outputs_class, outputs_coord)]
