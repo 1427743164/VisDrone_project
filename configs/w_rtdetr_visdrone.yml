@@ -8,7 +8,7 @@ output_dir: ./output/w_rtdetr_visdrone_final
 
 model:
   type: WRTDETR
-  backbone_depth: 50
+  backbone_depth: 18
   num_classes: 10
   hidden_dim: 256
   num_queries: 300
