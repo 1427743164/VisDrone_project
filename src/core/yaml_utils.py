@@ -71,7 +71,7 @@ def extract_schema(cls: type):
 def create(type_or_name, **kwargs):
     '''
     '''
-    # [新增] 增强鲁棒性：支持字典类型的输入，防止 yaml 解析出的 dict 导致报错
+    # [增强] 支持字典输入，增强鲁棒性
     if isinstance(type_or_name, dict):
         config = type_or_name.copy()
         if 'type' not in config:
@@ -93,10 +93,9 @@ def create(type_or_name, **kwargs):
 
     if isinstance(cfg, dict) and 'type' in cfg:
         _cfg: dict = GLOBAL_CONFIG[cfg['type']]
-        _cfg.update(cfg) # update global cls default args
-        _cfg.update(kwargs) # TODO
+        _cfg.update(cfg)
+        _cfg.update(kwargs)
         name = _cfg.pop('type')
-
         return create(name)
 
 
@@ -107,7 +106,7 @@ def create(type_or_name, **kwargs):
     cls_kwargs = {}
     cls_kwargs.update(cfg)
 
-    # [关键] 确保用户传入的 kwargs 优先级高于配置文件
+    # [关键] 必须先更新 kwargs，确保用户配置覆盖默认值
     cls_kwargs.update(kwargs)
 
     # shared var
@@ -119,7 +118,9 @@ def create(type_or_name, **kwargs):
 
     # inject
     for k in cfg['_inject']:
-        _k = cfg[k]
+        # [核心修复] 优先检查用户传入的参数 (cls_kwargs)，如果没传再看默认值 (cfg)
+        # 之前的代码直接用 _k = cfg[k]，导致如果默认值是 None (比如 matcher)，就会跳过实例化
+        _k = cls_kwargs.get(k, cfg.get(k))
 
         if _k is None:
             continue
@@ -136,22 +137,17 @@ def create(type_or_name, **kwargs):
                 cls_kwargs[k] = _cfg
 
         elif isinstance(_k, dict):
+            # 这是一个配置字典 (比如 matcher 的配置)，需要递归实例化
             if 'type' not in _k.keys():
                 raise ValueError(f'Missing inject for `type` style.')
 
-            _type = str(_k['type'])
-            if _type not in GLOBAL_CONFIG:
-                raise ValueError(f'Missing {_type} in inspect stage.')
-
-            # TODO modified inspace, maybe get wrong result for using `> 1`
-            _cfg: dict = GLOBAL_CONFIG[_type]
-            # _cfg_copy = copy.deepcopy(_cfg)
-            _cfg.update(_k) # update
-            cls_kwargs[k] = create(_type)
-            # _cfg.update(_cfg_copy) # resume
+            # 递归调用 create，把字典变成对象
+            # 这里的 _k 是具体的配置，比如 {'type': 'FrequencySinkhornMatcher', ...}
+            cls_kwargs[k] = create(_k)
 
         else:
-            raise ValueError(f'Inject does not support {_k}')
+            # 已经是实例对象了，或者是其他类型，无需操作
+            pass
 
 
     cls_kwargs = {n: cls_kwargs[n] for n in arg_names}
@@ -169,7 +165,7 @@ def load_config(file_path, cfg=dict()):
     _, ext = os.path.splitext(file_path)
     assert ext in ['.yml', '.yaml'], "only support yaml files for now"
 
-    # [关键修复] 增加 encoding='utf-8'，解决 Windows 下中文乱码报错
+    # [关键修复] 强制 utf-8，防止 Windows 编码报错
     with open(file_path, encoding='utf-8') as f:
         file_cfg = yaml.load(f, Loader=yaml.Loader)
         if file_cfg is None:
@@ -184,7 +180,7 @@ def load_config(file_path, cfg=dict()):
             if not base_yaml.startswith('/'):
                 base_yaml = os.path.join(os.path.dirname(file_path), base_yaml)
 
-            # [关键修复] 这里也要加 encoding='utf-8'
+            # [关键修复] 强制 utf-8
             with open(base_yaml, encoding='utf-8') as f:
                 base_cfg = load_config(base_yaml, cfg)
                 merge_config(base_cfg, cfg)
