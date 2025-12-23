@@ -71,7 +71,7 @@ def extract_schema(cls: type):
 def create(type_or_name, **kwargs):
     '''
     '''
-    # [增强] 支持字典输入，增强鲁棒性
+    # 支持字典输入
     if isinstance(type_or_name, dict):
         config = type_or_name.copy()
         if 'type' not in config:
@@ -96,6 +96,7 @@ def create(type_or_name, **kwargs):
         _cfg.update(cfg)
         _cfg.update(kwargs)
         name = _cfg.pop('type')
+
         return create(name)
 
 
@@ -106,7 +107,7 @@ def create(type_or_name, **kwargs):
     cls_kwargs = {}
     cls_kwargs.update(cfg)
 
-    # [关键] 必须先更新 kwargs，确保用户配置覆盖默认值
+    # 1. 先用传入的 kwargs 覆盖默认配置
     cls_kwargs.update(kwargs)
 
     # shared var
@@ -116,10 +117,9 @@ def create(type_or_name, **kwargs):
         else:
             cls_kwargs[k] = cfg[k]
 
-    # inject
+    # inject (实例化注入对象，如 transforms, matcher)
     for k in cfg['_inject']:
-        # [核心修复] 优先检查用户传入的参数 (cls_kwargs)，如果没传再看默认值 (cfg)
-        # 之前的代码直接用 _k = cfg[k]，导致如果默认值是 None (比如 matcher)，就会跳过实例化
+        # 优先使用 cls_kwargs 中的配置 (来自 kwargs 或 cfg)
         _k = cls_kwargs.get(k, cfg.get(k))
 
         if _k is None:
@@ -137,23 +137,22 @@ def create(type_or_name, **kwargs):
                 cls_kwargs[k] = _cfg
 
         elif isinstance(_k, dict):
-            # 这是一个配置字典 (比如 matcher 的配置)，需要递归实例化
             if 'type' not in _k.keys():
                 raise ValueError(f'Missing inject for `type` style.')
 
-            # 递归调用 create，把字典变成对象
-            # 这里的 _k 是具体的配置，比如 {'type': 'FrequencySinkhornMatcher', ...}
+            # 递归实例化：这里把字典变成了对象！
             cls_kwargs[k] = create(_k)
 
         else:
-            # 已经是实例对象了，或者是其他类型，无需操作
             pass
 
 
     cls_kwargs = {n: cls_kwargs[n] for n in arg_names}
 
-    # [保险] 再次更新，确保不被 inject 覆盖
-    cls_kwargs.update(kwargs)
+    # [关键修复] 删除了下面这行！
+    # 之前这行代码会把 kwargs 里的原始字典（如 transforms: dict）重新覆盖回去，
+    # 导致上面的 cls_kwargs[k] = create(_k) 实例化失效。
+    # cls_kwargs.update(kwargs)
 
     return cls(**cls_kwargs)
 
@@ -165,7 +164,7 @@ def load_config(file_path, cfg=dict()):
     _, ext = os.path.splitext(file_path)
     assert ext in ['.yml', '.yaml'], "only support yaml files for now"
 
-    # [关键修复] 强制 utf-8，防止 Windows 编码报错
+    # encoding='utf-8' 保持住
     with open(file_path, encoding='utf-8') as f:
         file_cfg = yaml.load(f, Loader=yaml.Loader)
         if file_cfg is None:
@@ -180,7 +179,6 @@ def load_config(file_path, cfg=dict()):
             if not base_yaml.startswith('/'):
                 base_yaml = os.path.join(os.path.dirname(file_path), base_yaml)
 
-            # [关键修复] 强制 utf-8
             with open(base_yaml, encoding='utf-8') as f:
                 base_cfg = load_config(base_yaml, cfg)
                 merge_config(base_cfg, cfg)

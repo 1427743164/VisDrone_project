@@ -97,12 +97,6 @@ class SetCriterion(nn.Module):
         target_classes[idx] = target_classes_o
 
         target = F.one_hot(target_classes, num_classes=self.num_classes+1)[..., :-1]
-        # ce_loss = F.binary_cross_entropy_with_logits(src_logits, target * 1., reduction="none")
-        # prob = F.sigmoid(src_logits) # TODO .detach()
-        # p_t = prob * target + (1 - prob) * (1 - target)
-        # alpha_t = self.alpha * target + (1 - self.alpha) * (1 - target)
-        # loss = alpha_t * ce_loss * ((1 - p_t) ** self.gamma)
-        # loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
@@ -130,10 +124,45 @@ class SetCriterion(nn.Module):
 
         pred_score = F.sigmoid(src_logits).detach()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
-        
+
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_vfl': loss}
+
+    # ====================================================================================
+    # [核心修复] 新增 NWD Loss 计算方法
+    # 专门用于解决 VisDrone 小目标检测问题，计算 Gaussian Wasserstein Distance
+    # ====================================================================================
+    def loss_nwd(self, outputs, targets, indices, num_boxes, log=True):
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)
+        src_boxes = outputs['pred_boxes'][idx]
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        # NWD 计算需要像素级或者统一尺度的坐标。
+        # 由于预测框和GT都是归一化的(0-1)，为了保证常数C=12.8的有效性，
+        # 我们这里假设一个参考尺度 640.0 (VisDrone 常用尺度)，或者如果不乘scale则需要调整C。
+        # 稳健做法：映射回 640 尺度计算
+        scale = 640.0
+        c_const = 12.8
+
+        b1 = src_boxes * scale
+        b2 = target_boxes * scale
+
+        cx1, cy1, w1, h1 = b1.unbind(-1)
+        cx2, cy2, w2, h2 = b2.unbind(-1)
+
+        # 计算 2-Wasserstein Distance (针对 Gaussian 分布)
+        # W2^2 = ||m1 - m2||^2 + ||sigma1 - sigma2||_F^2
+        # sigma = diag(w/2, h/2)
+        w2_sq = (cx1 - cx2).pow(2) + (cy1 - cy2).pow(2) + ((w1 - w2) / 2).pow(2) + ((h1 - h2) / 2).pow(2)
+
+        # NWD = exp( - sqrt(W2^2) / C )
+        nwd = torch.exp(-torch.sqrt(w2_sq + 1e-7) / c_const)
+
+        loss_nwd = (1 - nwd).sum() / num_boxes
+        return {'loss_nwd': loss_nwd}
+    # ====================================================================================
 
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
@@ -221,6 +250,9 @@ class SetCriterion(nn.Module):
             'bce': self.loss_labels_bce,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
+
+            # [关键修复] 注册 NWD Loss
+            'nwd': self.loss_nwd,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -300,7 +332,7 @@ class SetCriterion(nn.Module):
         dn_positive_idx, dn_num_group = dn_meta["dn_positive_idx"], dn_meta["dn_num_group"]
         num_gts = [len(t['labels']) for t in targets]
         device = targets[0]['labels'].device
-        
+
         dn_match_indices = []
         for i, num_gt in enumerate(num_gts):
             if num_gt > 0:
@@ -311,11 +343,8 @@ class SetCriterion(nn.Module):
             else:
                 dn_match_indices.append((torch.zeros(0, dtype=torch.int64, device=device), \
                     torch.zeros(0, dtype=torch.int64,  device=device)))
-        
+
         return dn_match_indices
-
-
-
 
 
 @torch.no_grad()
@@ -335,7 +364,3 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
-
-
-
-
