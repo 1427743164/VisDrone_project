@@ -14,6 +14,9 @@ from src.misc import logger
 from src.core import yaml_utils
 from src.zoo.rtdetr.utils import inverse_sigmoid
 
+# [关键修改] 显式导入 CocoEvaluator，而不是通过 logger 导入
+from src.data.coco.coco_eval import CocoEvaluator
+
 from tqdm import tqdm
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -109,14 +112,13 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
     pbar = tqdm(data_loader, desc=header, file=sys.stdout)
 
-    # [关键修复] 智能判断 postprocessors 类型
-    # 如果它是单个对象（没有 .keys()），我们假设它就是 bbox 的后处理器
     if hasattr(postprocessors, 'keys'):
         iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
     else:
-        iou_types = ('bbox',) # 默认为 bbox
+        iou_types = ('bbox',)
 
-    coco_evaluator = logger.CocoEvaluator(base_ds, iou_types)
+    # [关键修改] 直接使用导入的 CocoEvaluator 类，而不是 logger.CocoEvaluator
+    coco_evaluator = CocoEvaluator(base_ds, iou_types)
 
     panoptic_evaluator = None
 
@@ -128,11 +130,9 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
 
-        # [关键修复] 调用逻辑适配
         if hasattr(postprocessors, 'keys') and 'bbox' in postprocessors.keys():
             results = postprocessors['bbox'](outputs, orig_target_sizes)
         else:
-            # 如果 postprocessors 本身就是 callable 对象，直接调用
             results = postprocessors(outputs, orig_target_sizes)
 
         res = {target['image_id'].item(): output for target, output in zip(targets, results)}
